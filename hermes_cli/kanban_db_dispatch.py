@@ -2542,6 +2542,27 @@ def _resolve_hermes_argv() -> list[str]:
     return _module_hermes_argv()
 
 
+def _bind_worker_module_path(cmd: list[str], env: dict[str, str]) -> None:
+    """Keep the running Hermes install importable after a worker changes cwd.
+
+    The dispatcher may import ``hermes_cli`` from its checkout, while its
+    interpreter has no installed copy. A child launched with ``python -m``
+    from a task workspace otherwise exits before executing any task. Pin the
+    already-imported package's parent, not a PATH-discovered executable.
+    Python's safe-path flag is essential: without it, the untrusted task
+    workspace precedes PYTHONPATH for ``-m`` and can shadow ``hermes_cli``.
+    """
+    if cmd[:3] != [sys.executable, "-m", "hermes_cli.main"]:
+        return
+    import hermes_cli
+
+    root = str(Path(hermes_cli.__file__).resolve().parent.parent)
+    existing = env.get("PYTHONPATH", "")
+    parts = [p for p in existing.split(os.pathsep) if p and p != root]
+    env["PYTHONPATH"] = os.pathsep.join([root, *parts])
+    cmd.insert(1, "-P")
+
+
 def _worker_terminal_timeout_env(
     max_runtime_seconds: Optional[int],
     current_timeout: Optional[str],
@@ -2871,6 +2892,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env.pop("HERMES_TUI", None)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
+    _bind_worker_module_path(cmd, env)
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

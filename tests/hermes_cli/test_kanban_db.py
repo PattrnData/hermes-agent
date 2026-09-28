@@ -1595,6 +1595,75 @@ def test_resolve_hermes_argv_module_actually_runs():
     )
 
 
+def test_module_worker_imports_from_an_unrelated_workspace(tmp_path, monkeypatch):
+    """A source-checkout dispatcher must not spawn an unimportable child."""
+    import subprocess
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    argv = kbd._resolve_hermes_argv()
+    assert argv[:3] == [sys.executable, "-m", "hermes_cli.main"]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    kbd._bind_worker_module_path(argv, env)
+    assert argv[:4] == [sys.executable, "-P", "-m", "hermes_cli.main"]
+    result = subprocess.run(argv + ["--version"], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(Path(kbd.__file__).resolve().parent.parent)
+
+
+def test_module_worker_rejects_hostile_workspace_shadow(tmp_path, monkeypatch):
+    """A task workspace must never outrank the dispatcher's own package."""
+    import subprocess
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    shadow = tmp_path / "hermes_cli"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("SHADOW = True\n")
+    (shadow / "main.py").write_text("raise SystemExit(71)\n")
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    argv = kbd._resolve_hermes_argv()
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    kbd._bind_worker_module_path(argv, env)
+    result = subprocess.run(argv + ["--version"], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert argv[:4] == [sys.executable, "-P", "-m", "hermes_cli.main"]
+    origin = subprocess.run([sys.executable, "-P", "-c", "import hermes_cli; print(hermes_cli.__file__)"],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert origin.returncode == 0, origin.stderr
+    assert Path(origin.stdout.strip()).resolve() == Path(kbd.__file__).resolve().parent / "__init__.py"
+
+
+def test_module_worker_root_without_editable_install(tmp_path):
+    """Disabling site packages proves PYTHONPATH rather than an editable install."""
+    import subprocess
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    script = "import importlib.util; print(importlib.util.find_spec('hermes_cli').origin)"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    baseline = subprocess.run([sys.executable, "-P", "-S", "-c", script], cwd=tmp_path,
+                              env=env, capture_output=True, text=True, timeout=30)
+    assert baseline.returncode != 0, "checkout already importable without PYTHONPATH or site"
+    argv = [sys.executable, "-m", "hermes_cli.main"]
+    kbd._bind_worker_module_path(argv, env)
+    result = subprocess.run([sys.executable, "-P", "-S", "-c", script], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).resolve() == Path(kbd.__file__).resolve().parent / "__init__.py"
+
+
+def test_explicit_worker_launcher_does_not_inject_pythonpath():
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    env = {"PYTHONPATH": "/existing"}
+    kbd._bind_worker_module_path(["/opt/hermes/bin/hermes", "-p", "business-worker-1"], env)
+    assert env == {"PYTHONPATH": "/existing"}
+
+
 # ---------------------------------------------------------------------------
 # task_age — guard against corrupt timestamp values
 #
